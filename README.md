@@ -1,12 +1,19 @@
 # AuxiliaryASR
-This repo contains the training code for Phoneme-level ASR for Voice Conversion (VC) and TTS (Text-Mel Alignment) used in [StarGANv2-VC](https://github.com/yl4579/StarGANv2-VC) and [StyleTTS](https://github.com/yl4579/StyleTTS). 
+This repo is used as a Norweagian Phoneme-level ASR in TTS as a text aligner for StyleTTS2 (https://github.com/yl4579/StyleTTS2)
+
+
+
+
+
+
+
 
 ## Pre-requisites
 1. Python >= 3.7
 2. Clone this repository:
 ```bash
 git clone https://github.com/yl4579/AuxiliaryASR.git
-cd AuxiliaryASR
+cd AuxiliaryASR-NB
 ```
 3. Install python requirements: 
 ```bash
