@@ -1,5 +1,5 @@
 # AuxiliaryASR
-This repo is used as a Norweagian Phoneme-level ASR in TTS as a text aligner for StyleTTS2 (<cite>https://github.com/yl4579/StyleTTS2 </cite>)
+This repo is used as a Norweagian Phoneme-level ASR in TTS as a text aligner for StyleTTS2 ([https://github.com/yl4579/StyleTTS2])
 
 
 
