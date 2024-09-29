@@ -13,9 +13,11 @@ from torch import nn
 import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import DataLoader
+import librosa
+from nltk.tokenize import word_tokenize
+import phonetisaurus
 
-from g2p_en import G2p
-
+import re
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -35,6 +37,11 @@ MEL_PARAMS = {
     "hop_length": 300
 }
 
+import os
+
+os.environ['PHONEMIZER_ESPEAK_LIBRARY'] = '/home/lemoi18/StyleTTS2/Modules/espeak-ng/build/src/libespeak-ng/libespeak-ng.so.1.52.0.1'
+import phonemizer
+global_phonemizer = phonemizer.backend.EspeakBackend(language='nb', preserve_punctuation=True,  with_stress=True)
 class MelDataset(torch.utils.data.Dataset):
     def __init__(self,
                  data_list,
@@ -45,15 +52,14 @@ class MelDataset(torch.utils.data.Dataset):
         spect_params = SPECT_PARAMS
         mel_params = MEL_PARAMS
 
-        _data_list = [l[:-1].split('|') for l in data_list]
-        self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
+        _data_list = [l.split('|') for l in data_list]
+        self.data_list = [data if len(data) == 3 else (data[0], data[1], '0') for data in _data_list]
         self.text_cleaner = TextCleaner(dict_path)
         self.sr = sr
 
         self.to_melspec = torchaudio.transforms.MelSpectrogram(**MEL_PARAMS)
         self.mean, self.std = -4, 4
         
-        self.g2p = G2p()
 
     def __len__(self):
         return len(self.data_list)
@@ -78,24 +84,73 @@ class MelDataset(torch.utils.data.Dataset):
 
     def _load_tensor(self, data):
         wave_path, text, speaker_id = data
-        speaker_id = int(speaker_id)
+    
+        try:
+            # Convert speaker_id to integer
+            speaker_id = int(speaker_id)
+        except ValueError as e:
+            raise ValueError(f"Invalid speaker_id: {speaker_id}. Error: {e}")
+    
+        # Load audio file
         wave, sr = sf.read(wave_path)
-
-        # phonemize the text
-        ps = self.g2p(text.replace('-', ' '))
-        if "'" in ps:
-            ps.remove("'")
-        text = self.text_cleaner(ps)
-        blank_index = self.text_cleaner.word_index_dictionary[" "]
-        text.insert(0, blank_index) # add a blank at the beginning (silence)
-        text.append(blank_index) # add a blank at the end (silence)
+    
+        # Convert to mono if stereo
+        if wave.ndim > 1:
+            wave = np.mean(wave, axis=1)
+    
+        # Resample to 24kHz if necessary
+        if sr != 24000:
+            wave = librosa.resample(wave, orig_sr=sr, target_sr=24000)
+    
+        # Tokenize text while preserving punctuation
+        tokens = re.findall(r"[\w']+|[.,!?;:]", text)
+    
+        # Transcribe the entire sentence at once using the G2P model
+        result = list(transcribe(' '.join([t for t in tokens if re.match(r"[\w']+", t)])))  # Pass only words to `transcribe`
         
-        text = torch.LongTensor(text)
+        # Prepare to merge transcriptions and punctuation
+        transcription = []
+        result_index = 0
+    
+        for token in tokens:
+            if re.match(r"[.,!?;:]", token):  # If token is punctuation
+                # Append punctuation to the last phonetic transcription in the list
+                if transcription:
+                    transcription[-1] += token
+            else:  # Otherwise, it's a word
+                t, phonetic = result[result_index]
+                #print(t,phonetic)
+                transcription.extend(phonetic.split())  # Split phonetic into individual elements and add to transcription
+                result_index += 1
+    
+        # Join transcription as a single string for further processing
+        ps = ' '.join(transcription)
+        #print(transcription)
+        # Clean text and convert to indices
+        text_indices = self.text_cleaner(ps)
 
-        return wave, text, speaker_id
+        #print(text_indices)
+        blank_index = self.text_cleaner.word_index_dictionary[" "]
+        text_indices.insert(0, blank_index)  # Add silence at the beginning
+        text_indices.append(blank_index)     # Add silence at the end
+    
+        # Convert text to tensor
+        text_tensor = torch.LongTensor(text_indices)
+    
+        return wave, text_tensor, speaker_id
+        
 
+def transcribe_words(words, dialect='e', style="written"):
+    transcriptions = phonetisaurus.predict(words, model_path="/home/lemoi18/G2P-no/models/nb_e_written.fst")
+    return transcriptions
 
+def format_transcription(pronunciation):
+    return " ".join(pronunciation)
 
+def transcribe(text, dialect='e', style="written"):
+    words = text.split()
+    transcriptions = transcribe_words(words, dialect=dialect, style=style)
+    return [(word, format_transcription(pron)) for word, pron in transcriptions]
 
 class Collater(object):
     """
@@ -146,7 +201,7 @@ def build_dataloader(path_list,
                      validation=False,
                      batch_size=4,
                      num_workers=1,
-                     device='cpu',
+                     device='cuda',
                      collate_config={},
                      dataset_config={}):
 

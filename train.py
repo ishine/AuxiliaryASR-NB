@@ -33,7 +33,6 @@ def main(config_path):
     if not osp.exists(log_dir): os.mkdir(log_dir)
     shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
 
-    writer = SummaryWriter(log_dir + "/tensorboard")
 
     # write logs
     file_handler = logging.FileHandler(osp.join(log_dir, 'train.log'))
@@ -47,8 +46,9 @@ def main(config_path):
     save_freq = config.get('save_freq', 20)
     train_path = config.get('train_data', None)
     val_path = config.get('val_data', None)
+    wavs_path = config.get('wavs_data',None)
 
-    train_list, val_list = get_data_path_list(train_path, val_path)
+    train_list, val_list = get_data_path_list(train_path, val_path,wavs_path)
     train_dataloader = build_dataloader(train_list,
                                         batch_size=batch_size,
                                         num_workers=8,
@@ -103,10 +103,11 @@ def main(config_path):
         for key, value in results.items():
             if isinstance(value, float):
                 logger.info('%-15s: %.4f' % (key, value))
-                writer.add_scalar(key, value, epoch)
+                #writer.add_scalar(key, value, epoch)
             else:
                 for v in value:
-                    writer.add_figure('eval_attn', plot_image(v), epoch)
+                    plot_image(v)
+                    #writer.add_figure('eval_attn', plot_image(v), epoch)
         if (epoch % save_freq) == 0:
             trainer.save_checkpoint(osp.join(log_dir, 'epoch_%05d.pth' % epoch))
             

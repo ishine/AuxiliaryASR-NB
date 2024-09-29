@@ -19,7 +19,14 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 from utils import *
-
+from transformers import AutoModel
+from torch.nn.utils import weight_norm, spectral_norm
+import torch
+import torch.nn.functional as F
+import torch.nn as nn
+from torch.nn import Conv1d, AvgPool1d, Conv2d
+import torchaudio
+import whisper
 class Trainer(object):
     def __init__(self,
                  model=None,
@@ -27,7 +34,7 @@ class Trainer(object):
                  optimizer=None,
                  scheduler=None,
                  config={},
-                 device=torch.device("cpu"),
+                 device=torch.device("cuda"),
                  logger=logger,
                  train_dataloader=None,
                  val_dataloader=None,
@@ -46,7 +53,10 @@ class Trainer(object):
         self.device = device
         self.finish_train = False
         self.logger = logger
-        self.fp16_run = False
+        self.fp16_run = True
+        #self.whisper_model = AutoModel.from_pretrained("NbAiLabBeta/nb-whisper-small-verbatim")
+        #self.whisper_model.to(self.device)
+        #self.whisper_model.eval()
 
     def save_checkpoint(self, checkpoint_path):
         """Save checkpoint.
@@ -153,7 +163,9 @@ class Trainer(object):
 
     def run(self, batch):
         self.optimizer.zero_grad()
-        batch = [b.to(self.device) for b in batch]
+        #batch = [b.to(self.device) for b in batch]
+        batch = [b.to(self.device, non_blocking=True) if isinstance(b, torch.Tensor) else b for b in batch]
+
         text_input, text_input_length, mel_input, mel_input_length = batch
         mel_input_length = mel_input_length // (2 ** self.model.n_down)
         future_mask = self.model.get_future_mask(
@@ -171,14 +183,16 @@ class Trainer(object):
             loss_s2s += self.criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
         loss_s2s /= text_input.size(0)
 
-        loss = loss_ctc + loss_s2s
+
+        loss = loss_ctc + loss_s2s 
         loss.backward()
-        torch.nn.utils.clip_grad_value_(self.model.parameters(), 5)
+        torch.nn.utils.clip_grad_value_(self.model.parameters(), 4)
         self.optimizer.step()
         self.scheduler.step()
         return {'loss': loss.item(),
                 'ctc': loss_ctc.item(),
-                's2s': loss_s2s.item()}
+                's2s': loss_s2s.item()
+}
 
     def _train_epoch(self):
         train_losses = defaultdict(list)
@@ -198,7 +212,9 @@ class Trainer(object):
         eval_losses = defaultdict(list)
         eval_images = defaultdict(list)
         for eval_steps_per_epoch, batch in enumerate(tqdm(self.val_dataloader, desc="[eval]"), 1):
-            batch = [b.to(self.device) for b in batch]
+            #batch = [b.to(self.device) for b in batch]
+            batch = [b.to(self.device, non_blocking=True) if isinstance(b, torch.Tensor) else b for b in batch]
+
             text_input, text_input_length, mel_input, mel_input_length = batch
             mel_input_length = mel_input_length // (2 ** self.model.n_down)
             future_mask = self.model.get_future_mask(
@@ -213,8 +229,11 @@ class Trainer(object):
             for _s2s_pred, _text_input, _text_length in zip(s2s_pred, text_input, text_input_length):
                 loss_s2s += self.criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
             loss_s2s /= text_input.size(0)
-            loss = loss_ctc + loss_s2s
 
+
+    
+            loss = loss_ctc + loss_s2s 
+            
             eval_losses["eval/ctc"].append(loss_ctc.item())
             eval_losses["eval/s2s"].append(loss_s2s.item())
             eval_losses["eval/loss"].append(loss.item())
