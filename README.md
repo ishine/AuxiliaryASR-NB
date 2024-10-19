@@ -1,6 +1,13 @@
 # AuxiliaryASR
 This repo is used as a Norweagian Phoneme-level ASR in TTS as a text aligner for StyleTTS2 ([https://github.com/yl4579/StyleTTS2])
+Can be used for other lang, but i used it for Norweagian
 
+
+## Current Edits to the orignal repo
+- Switched from CNN to Conformer blocks
+- Added whisper to use transfer learning, but not currently using it
+- Added so that you get GT and predicted sequence is given in wandb with WER score
+  
 
 
 
