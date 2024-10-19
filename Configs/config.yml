@@ -1,11 +1,23 @@
-log_dir: "Checkpoint"
+log_dir: "Checkpoint69"
 save_freq: 10
 device: "cuda"
-epochs: 200
-batch_size: 64
+epochs: 100
+batch_size: 8
 pretrained_model: ""
-train_data: "Data/train_list.txt"
-val_data: "Data/val_list.txt"
+train_data: "train.txt"
+val_data: "val.txt"
+wavs_data: "/home/lemoi18/StyleTTS2/Datasetmaker/NEW_2"
+HF:
+  use: False
+  name: "ShoukanLabs/VokanV2-Internal-Dataset-ASR"
+  audio_column: "speech"
+  phoneme_column: "phoneme"
+  speaker_id_column: "speaker ID"
+  train_split: "train"
+  val_split: "train"
+  val_fraction: 0.1 # Used if both val split and train split are the same, if they are we create a split on x% of the full one
+  token: "insert hf token here"
+  preprocess: True #set to false if audio column is precomputed tensors, change audio column if necessary
 
 preprocess_parasm:
   sr: 24000
@@ -18,9 +30,9 @@ preprocess_parasm:
 
 model_params:
    input_dim: 80
-   hidden_dim: 256
-   n_token: 80
-   token_embedding_dim: 256
+   hidden_dim: 512
+   n_token: 188
+   token_embedding_dim: 512
 
 optimizer_params:
-  lr: 0.0005
+  lr: 0.001

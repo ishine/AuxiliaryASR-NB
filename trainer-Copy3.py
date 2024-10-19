@@ -26,10 +26,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch.nn import Conv1d, AvgPool1d, Conv2d
 import torchaudio
-
-import wandb
-
-
+import whisper
 class Trainer(object):
     def __init__(self,
                  model=None,
@@ -37,7 +34,7 @@ class Trainer(object):
                  optimizer=None,
                  scheduler=None,
                  config={},
-                 device=torch.device("cuda"),
+                 device=torch.device("cpu"),
                  logger=logger,
                  train_dataloader=None,
                  val_dataloader=None,
@@ -57,7 +54,9 @@ class Trainer(object):
         self.finish_train = False
         self.logger = logger
         self.fp16_run = True
-
+        self.whisper_model = AutoModel.from_pretrained("NbAiLabBeta/nb-whisper-small-verbatim")
+        self.whisper_model.to(self.device)
+        self.whisper_model.eval()
 
     def save_checkpoint(self, checkpoint_path):
         """Save checkpoint.
@@ -75,7 +74,6 @@ class Trainer(object):
         if not os.path.exists(os.path.dirname(checkpoint_path)):
             os.makedirs(os.path.dirname(checkpoint_path))
         torch.save(state_dict, checkpoint_path)
-
 
     def load_checkpoint(self, checkpoint_path, load_only_params=False):
         """Load checkpoint.
@@ -143,33 +141,6 @@ class Trainer(object):
             break
         return lr
 
-
-    def adaptive_gradient_clipping(self, clip_factor=0.01, eps=1e-6):
-        
-        """
-        Adaptive Gradient Clipping (AGC) for a model's parameters.
-        
-        Args:
-            model (torch.nn.Module): The model whose gradients are being clipped.
-            clip_factor (float): The scaling factor λ. Typically a small value (e.g., 0.01).
-            eps (float): A small epsilon value to prevent division by zero.
-        """
-        for param in self.model.parameters():
-            # Skip if there is no gradient
-            if param.grad is None:
-                continue
-            
-            # Compute the L2 norm of weights and gradients
-            weight_norm = torch.norm(param, p=2).clamp(min=eps)  # Ensure norm is at least eps to prevent divide by zero
-            grad_norm = torch.norm(param.grad, p=2)
-    
-            # Calculate adaptive clipping threshold
-            clip_value = clip_factor * weight_norm
-    
-            # Clip the gradient if its norm exceeds the threshold
-            if grad_norm > clip_value:
-                param.grad.mul_(clip_value / grad_norm)
-
     @staticmethod
     def get_image(arrs):
         pil_images = []
@@ -192,12 +163,10 @@ class Trainer(object):
 
     def run(self, batch):
         self.optimizer.zero_grad()
-        batch = [b.to(self.device) for b in batch]
-        #batch = [b.to(self.device) if isinstance(b, torch.Tensor) else b for b in batch]
-        
-        #text_input, text_input_length, mel_input, mel_input_length, paths, wave_input = batch
-        text_input, text_input_length, mel_input, mel_input_length = batch
+        #batch = [b.to(self.device) for b in batch]
+        batch = [b.to(self.device) if isinstance(b, torch.Tensor) else b for b in batch]
 
+        text_input, text_input_length, mel_input, mel_input_length, paths, wave_input = batch
         mel_input_length = mel_input_length // (2 ** self.model.n_down)
         future_mask = self.model.get_future_mask(
             mel_input.size(2)//(2**self.model.n_down), unmask_future_steps=0).to(self.device)
@@ -214,71 +183,68 @@ class Trainer(object):
             loss_s2s += self.criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
         loss_s2s /= text_input.size(0)
 
-        #feature_matching_loss = self._calculate_feature_matching_loss(wave_input, mel_input, "MSE")
+        encoder_features = self.model.get_feature(mel_input)
 
-        #lambda_feature = 0.2  # Weight for feature matching loss
+                # Get Whisper encoder embeddings (acoustic embeddings)
+        resampler = torchaudio.transforms.Resample(orig_freq=24000, new_freq=16000).to(self.device)
+    
+         # Squeeze the wave input to remove extra channel dimension if present
+        wave_input_squeezed = [wave.squeeze(1) if wave.ndim == 3 else wave for wave in wave_input]
+        
+        # 1. Find maximum length of the inputs
+        max_audio_length = max([wave.shape[-1] for wave in wave_input_squeezed])
+        
+        # 2. Pad or trim all wave inputs to match the maximum length
+        wave_input_padded = [whisper.pad_or_trim(wave, max_audio_length) for wave in wave_input_squeezed]
 
-        #loss = loss_ctc + loss_s2s + feature_matching_loss * lambda_feature
-        loss = loss_ctc + loss_s2s
 
+        whisper_inputs_resampled = torch.stack([resampler(a.to(self.device)) for a in wave_input_padded])
+            # Generate log Mel spectrogram for Whisper
+        whisper_mel = torch.stack([whisper.log_mel_spectrogram(a) for a in whisper_inputs_resampled]).to(self.device)
+
+        target_frames = 3000
+        current_frames = whisper_mel.shape[-1]
+    
+            # Trim the Mel spectrogram if it has more than 1500 frames
+        if current_frames > target_frames:
+            whisper_mel = whisper_mel[:, :, :target_frames]
+            # Pad the Mel spectrogram with zeros if it has fewer than 1500 frames
+        elif current_frames < target_frames:
+            pad_size = target_frames - current_frames
+            whisper_mel = F.pad(whisper_mel, (0, pad_size), mode='constant', value=0)
+    
+  
+        whisper_embeddings = self.whisper_model.encoder(whisper_mel)
+
+
+        whisper_embeddings = whisper_embeddings.last_hidden_state
+        
+        # Get sizes
+        encoder_seq_len = encoder_features.size(1)
+        encoder_feature_dim = encoder_features.size(-1)
+
+        downsample = nn.AdaptiveAvgPool1d(encoder_seq_len).to(self.device)
+        whisper_embeddings_projected_downsampled = downsample(whisper_embeddings.permute(0, 2, 1)).permute(0, 2, 1)
+ 
+        project_feature_dim = nn.Linear(whisper_embeddings_projected_downsampled.size(-1), encoder_feature_dim).to(self.device)
+        whisper_embeddings_projected_downsampled = project_feature_dim(whisper_embeddings_projected_downsampled)
+
+        feature_matching_loss = F.mse_loss(encoder_features, whisper_embeddings_projected_downsampled)
+
+
+        lambda_feature = 1  # Weight for feature matching loss
+
+        loss = loss_ctc + loss_s2s + feature_matching_loss * lambda_feature
         loss.backward()
-        for name, param in self.model.named_parameters():
-            if param.grad is None:
-                
-                print(f"No gradients for parameter {name}")
-        self.adaptive_gradient_clipping(clip_factor=0.01)
-        #torch.nn.utils.clip_grad_value_(self.model.parameters(), 50)
+        torch.nn.utils.clip_grad_value_(self.model.parameters(), 5)
         self.optimizer.step()
         self.scheduler.step()
         return {'loss': loss.item(),
                 'ctc': loss_ctc.item(),
-                's2s': loss_s2s.item()
+                's2s': loss_s2s.item(),
+                'feature_matching_loss': feature_matching_loss.item()
 }
 
-
-    def _calculate_feature_matching_loss(self, wave_input, mel_input, loss_type="MSE"):
-        # Whisper feature extraction
-        with torch.no_grad():
-    
-            resampler = torchaudio.transforms.Resample(orig_freq=24000, new_freq=16000).to(self.device)
-            wave_input_squeezed = [wave.squeeze(1) if wave.ndim == 3 else wave for wave in wave_input]
-            max_audio_length = max([wave.shape[-1] for wave in wave_input_squeezed])
-            wave_input_padded = [whisper.pad_or_trim(wave, max_audio_length) for wave in wave_input_squeezed]
-            whisper_inputs_resampled = torch.stack([resampler(a.to(self.device)) for a in wave_input_padded])
-            whisper_mel = torch.stack([whisper.log_mel_spectrogram(a) for a in whisper_inputs_resampled]).to(self.device)
-    
-            # Pad or trim whisper_mel to match the target frames
-            target_frames = 3000
-            current_frames = whisper_mel.shape[-1]
-            if current_frames > target_frames:
-                whisper_mel = whisper_mel[:, :, :target_frames]
-            elif current_frames < target_frames:
-                pad_size = target_frames - current_frames
-                whisper_mel = F.pad(whisper_mel, (0, pad_size), mode='constant', value=0)
-    
-            # Extract whisper embeddings
-            whisper_embeddings = self.whisper_model.encoder(whisper_mel).last_hidden_state
-
-        # Project whisper embeddings to match encoder features
-        encoder_features = self.model.get_feature(mel_input)
-        encoder_seq_len = encoder_features.size(1)
-        encoder_feature_dim = encoder_features.size(-1)
-        downsample = nn.AdaptiveAvgPool1d(encoder_seq_len).to(self.device)
-        whisper_embeddings_projected_downsampled = downsample(whisper_embeddings.permute(0, 2, 1)).permute(0, 2, 1)
-        project_feature_dim = nn.Linear(whisper_embeddings_projected_downsampled.size(-1), encoder_feature_dim).to(self.device)
-        whisper_embeddings_projected_downsampled = project_feature_dim(whisper_embeddings_projected_downsampled).detach()
-
-        # Calculate feature matching loss
-        if loss_type == "MSE":
-            feature_matching_loss = F.mse_loss(encoder_features, whisper_embeddings_projected_downsampled)
-        elif loss_type == "KL":
-            feature_matching_loss = F.kl_div(F.log_softmax(encoder_features, dim=-1), F.softmax(whisper_embeddings_projected_downsampled, dim=-1), reduction='batchmean')
-        else:
-            raise ValueError("Invalid loss type specified. Choose between 'MSE' and 'KL'.")
-
-        return feature_matching_loss
-
-    
     def _train_epoch(self):
         train_losses = defaultdict(list)
         self.model.train()
@@ -296,120 +262,99 @@ class Trainer(object):
         self.model.eval()
         eval_losses = defaultdict(list)
         eval_images = defaultdict(list)
-        true_labels = []
-        predicted_labels = []
-        results_table = wandb.Table(columns=["Sample_ID", "Ground_Truth", "Prediction", "WER"])
-    
-        total_sentence_errors = 0
-        total_sentences = 0
-    
         for eval_steps_per_epoch, batch in enumerate(tqdm(self.val_dataloader, desc="[eval]"), 1):
-            batch = [b.to(self.device) for b in batch]
-    
-            text_input, text_input_length, mel_input, mel_input_length = batch
+            #batch = [b.to(self.device) for b in batch]
+            batch = [b.to(self.device) if isinstance(b, torch.Tensor) else b for b in batch]
+
+            text_input, text_input_length, mel_input, mel_input_length, paths, wave_input = batch
             mel_input_length = mel_input_length // (2 ** self.model.n_down)
             future_mask = self.model.get_future_mask(
-                mel_input.size(2) // (2 ** self.model.n_down), unmask_future_steps=0
-            ).to(self.device)
+                mel_input.size(2)//(2**self.model.n_down), unmask_future_steps=0).to(self.device)
             mel_mask = self.model.length_to_mask(mel_input_length)
             text_mask = self.model.length_to_mask(text_input_length)
             ppgs, s2s_pred, s2s_attn = self.model(
-                mel_input, src_key_padding_mask=mel_mask, text_input=text_input
-            )
-            loss_ctc = self.criterion['ctc'](
-                ppgs.log_softmax(dim=2).transpose(0, 1),
-                text_input, mel_input_length, text_input_length
-            )
+                mel_input, src_key_padding_mask=mel_mask, text_input=text_input)
+            loss_ctc = self.criterion['ctc'](ppgs.log_softmax(dim=2).transpose(0, 1),
+                                          text_input, mel_input_length, text_input_length)
             loss_s2s = 0
             for _s2s_pred, _text_input, _text_length in zip(s2s_pred, text_input, text_input_length):
                 loss_s2s += self.criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
             loss_s2s /= text_input.size(0)
+
+            encoder_features = self.model.get_feature(mel_input)
     
-            loss = loss_ctc + loss_s2s
+                    # Get Whisper encoder embeddings (acoustic embeddings)
+            resampler = torchaudio.transforms.Resample(orig_freq=24000, new_freq=16000).to(self.device)
+        
+             # Squeeze the wave input to remove extra channel dimension if present
+            wave_input_squeezed = [wave.squeeze(1) if wave.ndim == 3 else wave for wave in wave_input]
+            
+            # 1. Find maximum length of the inputs
+            max_audio_length = max([wave.shape[-1] for wave in wave_input_squeezed])
+            
+            # 2. Pad or trim all wave inputs to match the maximum length
+            wave_input_padded = [whisper.pad_or_trim(wave, max_audio_length) for wave in wave_input_squeezed]
     
+    
+            whisper_inputs_resampled = torch.stack([resampler(a.to(self.device)) for a in wave_input_padded])
+
+                # Generate log Mel spectrogram for Whisper
+            whisper_mel = torch.stack([whisper.log_mel_spectrogram(a) for a in whisper_inputs_resampled]).to(self.device)
+    
+            target_frames = 3000
+            current_frames = whisper_mel.shape[-1]
+        
+                # Trim the Mel spectrogram if it has more than 1500 frames
+            if current_frames > target_frames:
+                whisper_mel = whisper_mel[:, :, :target_frames]
+                # Pad the Mel spectrogram with zeros if it has fewer than 1500 frames
+            elif current_frames < target_frames:
+                pad_size = target_frames - current_frames
+                whisper_mel = F.pad(whisper_mel, (0, pad_size), mode='constant', value=0)
+        
+      
+            whisper_embeddings = self.whisper_model.encoder(whisper_mel)
+    
+    
+            whisper_embeddings = whisper_embeddings.last_hidden_state
+            
+            # Get sizes
+            encoder_seq_len = encoder_features.size(1)
+            encoder_feature_dim = encoder_features.size(-1)
+    
+            downsample = nn.AdaptiveAvgPool1d(encoder_seq_len).to(self.device)
+            whisper_embeddings_projected_downsampled = downsample(whisper_embeddings.permute(0, 2, 1)).permute(0, 2, 1)
+     
+            project_feature_dim = nn.Linear(whisper_embeddings_projected_downsampled.size(-1), encoder_feature_dim).to(self.device)
+            whisper_embeddings_projected_downsampled = project_feature_dim(whisper_embeddings_projected_downsampled)
+    
+            feature_matching_loss = F.mse_loss(encoder_features, whisper_embeddings_projected_downsampled)
+    
+            lambda_feature = 1  # Weight for feature matching loss
+            loss = loss_ctc + loss_s2s + lambda_feature * feature_matching_loss 
+            
             eval_losses["eval/ctc"].append(loss_ctc.item())
             eval_losses["eval/s2s"].append(loss_s2s.item())
+            eval_losses["eval/feature_matching_loss"].append(feature_matching_loss.item())
             eval_losses["eval/loss"].append(loss.item())
-    
-            # Compute WER
+
             _, amax_ppgs = torch.max(ppgs, dim=2)
-            wers = [
-                calc_wer(
-                    target[:text_length],
-                    pred[:mel_length],
-                    ignore_indexes=[0, 1, 2, 3, 10]
-                )
-                for target, pred, text_length, mel_length in zip(
-                    text_input.cpu(), amax_ppgs.cpu(), text_input_length.cpu(), mel_input_length.cpu()
-                )
-            ]
+            wers = [calc_wer(target[:text_length],
+                             pred[:mel_length],
+                             ignore_indexes=list(range(5))) \
+                    for target, pred, text_length, mel_length in zip(
+                            text_input.cpu(), amax_ppgs.cpu(), text_input_length.cpu(), mel_input_length.cpu())]
             eval_losses["eval/wer"].extend(wers)
-    
-            # Token-level accuracy
+
             _, amax_s2s = torch.max(s2s_pred, dim=2)
-            acc = [
-                torch.eq(target[:length], pred[:length]).float().mean().item()
-                for target, pred, length in zip(
-                    text_input.cpu(), amax_s2s.cpu(), text_input_length.cpu()
-                )
-            ]
+            acc = [torch.eq(target[:length], pred[:length]).float().mean().item() \
+                   for target, pred, length in zip(text_input.cpu(), amax_s2s.cpu(), text_input_length.cpu())]
             eval_losses["eval/acc"].extend(acc)
-    
-            # Compute average confidence
-            for idx, (pred, length) in enumerate(zip(s2s_pred, text_input_length)):
-                # Get softmax probabilities
-                probs = F.softmax(pred[:length], dim=-1)  # Shape: (sequence_length, num_classes)
-                max_probs, _ = torch.max(probs, dim=-1)  # Shape: (sequence_length,)
-    
-                # Calculate average confidence
-                avg_confidence = max_probs.mean().item()
-                eval_losses["eval/avg_confidence"].append(avg_confidence)
-    
-            # Compute Sentence Error Rate (SER) and prepare data for results table
-            for idx, (target, pred, text_length, mel_length) in enumerate(
-                zip(text_input.cpu(), amax_ppgs.cpu(), text_input_length.cpu(), mel_input_length.cpu())
-            ):
-                target_filtered = [
-                    int(t.item()) for t in target[:text_length]
-                    if int(t.item()) not in [0, 1, 2, 3, 10]
-                ]
-                pred_filtered = [
-                    int(p.item()) for p in pred[:mel_length]
-                    if int(p.item()) not in [0, 1, 2, 3, 10]
-                ]
-    
-                # Check for exact match
-                if target_filtered != pred_filtered:
-                    total_sentence_errors += 1
-                total_sentences += 1
-    
-                # Prepare strings for the results table
-                target_str = " ".join(map(str, target_filtered))
-                pred_str = " ".join(map(str, pred_filtered))
-    
-                # Calculate WER for the table (if needed)
-                wers = calc_wer(
-                    target[:text_length], pred[:mel_length], ignore_indexes=[0, 1, 2, 3, 10]
-                )
-    
-                # Add data to the WandB table
-                results_table.add_data(idx, target_str, pred_str, wers)
-    
+
             if eval_steps_per_epoch <= 2:
                 eval_images["eval/image"].append(
-                    self.get_image([s2s_attn[0].cpu().numpy()])
-                )
-    
-        # After processing all batches, compute SER
-        ser_value = total_sentence_errors / total_sentences if total_sentences > 0 else 0
-        eval_losses["eval/ser"] = ser_value
-    
-        # Average the collected losses
-        eval_losses = {
-            key: np.mean(value) if isinstance(value, list) else value
-            for key, value in eval_losses.items()
-        }
-        eval_losses.update(eval_images)
-        eval_losses["results_table"] = results_table
-        return eval_losses
+                    self.get_image([s2s_attn[0].cpu().numpy()]))
 
+        eval_losses = {key: np.mean(value) for key, value in eval_losses.items()}
+        eval_losses.update(eval_images)
+        return eval_losses

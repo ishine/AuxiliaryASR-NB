@@ -352,3 +352,115 @@ class MFCC(nn.Module):
         if unsqueezed:
             mfcc = mfcc.squeeze(0)
         return mfcc
+
+
+
+import torch
+from torch import nn
+
+class ConformerPreBlock(nn.Module):
+    def __init__(self, dim_model, ff_multiplier=4, conv_kernel_size=31, dropout=0.1):
+        super(ConformerPreBlock, self).__init__()
+
+        # Feed-forward module (first half)
+        self.ff1 = nn.Sequential(
+            nn.LayerNorm(dim_model),
+            nn.Linear(dim_model, ff_multiplier * dim_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_multiplier * dim_model, dim_model),
+            nn.Dropout(dropout)
+        )
+
+        # Depthwise Convolution Module for Pre-block with kernel_size=31
+        self.pre_conv_module = nn.Sequential(
+            nn.Conv1d(dim_model, dim_model, kernel_size=conv_kernel_size, padding=conv_kernel_size // 2, groups=dim_model),
+            nn.BatchNorm1d(dim_model),
+            nn.SiLU(),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        # Feed-forward module (first half)
+        x = x + 0.5 * self.ff1(x)  # Residual connection with scaling (0.5)
+
+        # Depthwise Convolution
+        x = x.permute(1, 2, 0)  # (batch, channel, time)
+        conv_output = self.pre_conv_module(x)
+        x = conv_output.permute(2, 0, 1)  # (time, batch, channel)
+        
+        return x
+
+
+class ConformerMainBlock(nn.Module):
+    def __init__(self, dim_model, num_heads, ff_multiplier=4, conv_kernel_size=15, num_layers=1, dropout=0.1):
+        super(ConformerMainBlock, self).__init__()
+
+        # Create n-1 layers for the main body conformer block
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                'self_attention': nn.MultiheadAttention(embed_dim=dim_model, num_heads=num_heads, dropout=dropout),
+                'attention_norm': nn.LayerNorm(dim_model),
+                'conv_module': nn.Sequential(
+                    nn.Conv1d(dim_model, 2 * dim_model, kernel_size=1),
+                    nn.GLU(dim=1),
+                    nn.Conv1d(dim_model, dim_model, kernel_size=conv_kernel_size, padding=conv_kernel_size // 2, groups=dim_model),
+                    nn.BatchNorm1d(dim_model),
+                    nn.SiLU(),
+                    nn.Conv1d(dim_model, dim_model, kernel_size=1),
+                    nn.Dropout(dropout)
+                ),
+                'conv_norm': nn.LayerNorm(dim_model),
+                'ff2': nn.Sequential(
+                    nn.LayerNorm(dim_model),
+                    nn.Linear(dim_model, ff_multiplier * dim_model),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(ff_multiplier * dim_model, dim_model),
+                    nn.Dropout(dropout)
+                )
+            }) for _ in range(num_layers)
+        ])
+
+        # Final LayerNorm
+        self.final_norm = nn.LayerNorm(dim_model)
+
+    def forward(self, x, mask=None):
+        # Iterate over each layer in the main block
+        for layer in self.layers:
+            # Self-Attention module
+            attn_output, _ = layer['self_attention'](x, x, x, key_padding_mask=mask)
+            x = x + layer['attention_norm'](attn_output)
+
+            # Convolution module
+            x = x.permute(1, 2, 0)  # (batch, channel, time)
+            conv_output = layer['conv_module'](x)
+            conv_output = conv_output.permute(2, 0, 1)  # (time, batch, channel)
+            x = x.permute(2, 0, 1)  # (time, batch, channel)
+            x = x + layer['conv_norm'](conv_output)
+
+            # Feed-forward module (second half)
+            x = x + 0.5 * layer['ff2'](x)
+
+        return self.final_norm(x)
+
+
+class ConformerBlock(nn.Module):
+    def __init__(self, dim_model, num_heads, ff_multiplier=4, pre_conv_kernel_size=31, body_conv_kernel_size=15, num_layers=6, dropout=0.1):
+        super(ConformerBlock, self).__init__()
+
+        # Pre-block (one layer)
+        self.pre_block = ConformerPreBlock(dim_model, ff_multiplier, conv_kernel_size=pre_conv_kernel_size, dropout=dropout)
+
+        # Main-body block (n-1 layers)
+        self.main_block = ConformerMainBlock(dim_model, num_heads, ff_multiplier, conv_kernel_size=body_conv_kernel_size, num_layers=num_layers - 1, dropout=dropout)
+
+    def forward(self, x, mask=None):
+        # Pre-block processing (1 layer)
+        x = self.pre_block(x)
+
+        # Main body processing (n-1 layers)
+        x = self.main_block(x, mask=mask)
+
+        return x
+
