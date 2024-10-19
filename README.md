@@ -12,7 +12,7 @@ Can be used for other lang, but i used it for Norweagian
 
 
 
-
+---
 
 
 ## Pre-requisites
