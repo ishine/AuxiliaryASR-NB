@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from torch.nn import TransformerEncoder
 import torch.nn.functional as F
-from layers import MFCC, Attention, LinearNorm, ConvNorm, ConvBlock
+from layers import MFCC, Attention, LinearNorm, ConvNorm, ConvBlock, ConformerBlock
 
 def build_model(model_params={}, model_type='asr'):
     model = ASRCNN(**model_params)
@@ -16,37 +16,68 @@ class ASRCNN(nn.Module):
                  hidden_dim=256,
                  n_token=35,
                  n_layers=6,
+                 num_heads=8,
                  token_embedding_dim=256,
-
-    ):
+                 use_conformer=True):
         super().__init__()
         self.n_token = n_token
         self.n_down = 1
+        self.use_conformer = use_conformer  # Parameter to enable/disable Conformer
+
+        # Existing CNN layers
         self.to_mfcc = MFCC()
-        self.init_cnn = ConvNorm(input_dim//2, hidden_dim, kernel_size=7, padding=3, stride=2)
-        self.cnns = nn.Sequential(
-            *[nn.Sequential(
-                ConvBlock(hidden_dim),
-                nn.GroupNorm(num_groups=1, num_channels=hidden_dim)
-            ) for n in range(n_layers)])
+        self.init_cnn = ConvNorm(input_dim // 2, hidden_dim, kernel_size=7, padding=3, stride=2)
+        self.instance_norm = nn.InstanceNorm1d(hidden_dim)
+        #self.cnns = nn.Sequential(
+        #    *[nn.Sequential(
+       #         ConvBlock(hidden_dim),
+       #         nn.GroupNorm(num_groups=1, num_channels=hidden_dim)
+       #     ) for _ in range(n_layers)]
+       # )
+
+        # Conformer layers (stacked)
+        self.conformer_blocks = ConformerBlock(
+            dim_model=hidden_dim,
+            num_heads=num_heads,
+            num_layers=n_layers,  # Total layers
+            pre_conv_kernel_size=31,  # Pre-conformer kernel size
+            body_conv_kernel_size=15,  # Main body kernel size
+            dropout=0.1
+        )
+
+
+        # Projection and linear layers
         self.projection = ConvNorm(hidden_dim, hidden_dim // 2)
         self.ctc_linear = nn.Sequential(
-            LinearNorm(hidden_dim//2, hidden_dim),
+            LinearNorm(hidden_dim // 2, hidden_dim),
             nn.ReLU(),
-            LinearNorm(hidden_dim, n_token))
+            LinearNorm(hidden_dim, n_token)
+        )
+
+        # Sequence-to-sequence (S2S) component
         self.asr_s2s = ASRS2S(
             embedding_dim=token_embedding_dim,
-            hidden_dim=hidden_dim//2,
-            n_token=n_token)
+            hidden_dim=hidden_dim // 2,
+            n_token=n_token
+        )
 
     def forward(self, x, src_key_padding_mask=None, text_input=None):
+        # Initial feature extraction
         x = self.to_mfcc(x)
         x = self.init_cnn(x)
-        x = self.cnns(x)
+        #x = self.cnns(x)
 
+        # Pass through Conformer layers if enabled
+        if self.use_conformer:
+            x = x.permute(2, 0, 1)  # Rearrange to (time, batch, channel) for Conformer
+            x = self.conformer_blocks(x)
+            x = x.permute(1, 2, 0)  # Rearrange back to (batch, channel, time)
+
+        # Continue with existing pipeline
         x = self.projection(x)
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2)  # (batch, time, channel)
         ctc_logit = self.ctc_linear(x)
+
         if text_input is not None:
             _, s2s_logit, s2s_attn = self.asr_s2s(x, src_key_padding_mask, text_input)
             return ctc_logit, s2s_logit, s2s_attn
@@ -57,6 +88,13 @@ class ASRCNN(nn.Module):
         x = self.to_mfcc(x)
         x = self.init_cnn(x)
         x = self.cnns(x)
+    
+        # If using the Conformer, include it in the feature extraction
+        if self.use_conformer:
+            x = x.permute(2, 0, 1)  # (batch, channel, time) -> (time, batch, channel)
+            x = self.conformer_blocks(x)
+            x = x.permute(1, 2, 0)  # (time, batch, channel) -> (batch, channel, time)
+    
         x = self.instance_norm(x)
         x = self.projection(x)
         return x
@@ -134,6 +172,9 @@ class ASRS2S(nn.Module):
         _text_input = text_input.clone()
         _text_input.masked_fill_(random_mask, self.unk_index)
         decoder_inputs = self.embedding(_text_input).transpose(0, 1) # -> [T, B, channel]
+        ### IF THE TRANING CHRASES THEN CHECK YOUR N TOKENS
+        #print(f"Decoder input indices: {[self.sos]*decoder_inputs.size(1)}")
+
         start_embedding = self.embedding(
             torch.LongTensor([self.sos]*decoder_inputs.size(1)).to(decoder_inputs.device))
         decoder_inputs = torch.cat((start_embedding.unsqueeze(0), decoder_inputs), dim=0)
@@ -178,7 +219,7 @@ class ASRS2S(nn.Module):
         hidden = self.project_to_hidden(hidden_and_context)
 
         # dropout to increasing g
-        logit = self.project_to_n_symbols(F.dropout(hidden, 0.5, self.training))
+        logit = self.project_to_n_symbols(F.dropout(hidden, 0.3, self.training))
 
         return hidden, logit, self.attention_weights
 
@@ -191,3 +232,4 @@ class ASRS2S(nn.Module):
         hidden = torch.stack(hidden).transpose(0, 1).contiguous()
 
         return hidden, logit, alignments
+

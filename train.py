@@ -14,9 +14,13 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import click
-
+import wandb
 import logging
 from logging import StreamHandler
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 handler = StreamHandler()
@@ -33,6 +37,7 @@ def main(config_path):
     if not osp.exists(log_dir): os.mkdir(log_dir)
     shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
 
+    wandb.init(project="AuxiliaryASR", dir=log_dir)
 
     # write logs
     file_handler = logging.FileHandler(osp.join(log_dir, 'train.log'))
@@ -51,14 +56,14 @@ def main(config_path):
     train_list, val_list = get_data_path_list(train_path, val_path,wavs_path)
     train_dataloader = build_dataloader(train_list,
                                         batch_size=batch_size,
-                                        num_workers=8,
+                                        num_workers=0,
                                         dataset_config=config.get('dataset_params', {}),
                                         device=device)
 
     val_dataloader = build_dataloader(val_list,
                                       batch_size=batch_size,
                                       validation=True,
-                                      num_workers=2,
+                                      num_workers=0,
                                       device=device,
                                       dataset_config=config.get('dataset_params', {}))
 
@@ -75,7 +80,7 @@ def main(config_path):
     optimizer, scheduler = build_optimizer(
         {"params": model.parameters(), "optimizer_params":{}, "scheduler_params": scheduler_params})
 
-    blank_index = train_dataloader.dataset.text_cleaner.word_index_dictionary[" "] # get blank index
+    blank_index = train_dataloader.dataset.text_cleaner.word_index_dictionary["$"] # get blank index
 
     criterion = build_criterion(critic_params={
                 'ctc': {'blank': blank_index},
@@ -100,16 +105,40 @@ def main(config_path):
         results = train_results.copy()
         results.update(eval_results)
         logger.info('--- epoch %d ---' % epoch)
+    
+        # Prepare a dictionary to accumulate items to log
+        wandb_log_dict = {"epoch": epoch}
+
+        results_table = results.pop("results_table")
+        
         for key, value in results.items():
             if isinstance(value, float):
+                # Log scalar metrics
                 logger.info('%-15s: %.4f' % (key, value))
-                #writer.add_scalar(key, value, epoch)
-            else:
+                wandb_log_dict[key] = value
+            elif isinstance(value, list):
+                # Assume value is a list of images
+                images = []
                 for v in value:
-                    plot_image(v)
-                    #writer.add_figure('eval_attn', plot_image(v), epoch)
-        if (epoch % save_freq) == 0:
-            trainer.save_checkpoint(osp.join(log_dir, 'epoch_%05d.pth' % epoch))
+                    fig = plot_image(v)
+                    images.append(wandb.Image(fig))
+                    plt.close(fig)
+                wandb_log_dict[key] = images
+            else:
+                logger.warning(f"Unhandled result type for key '{key}': {type(value)}")
+
+    
+        # Log the results table
+        wandb_log_dict["Evaluation_Results"] = results_table
+
+        # Log all items at once
+        wandb.log(wandb_log_dict)
+
+
+    
+        if (epoch+1)%save_freq == 0:
+            trainer.save_checkpoint(osp.join(log_dir, f'epoch_{epoch:05d}.pth'))
+
             
     return 0
 

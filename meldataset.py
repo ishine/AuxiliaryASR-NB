@@ -57,7 +57,7 @@ class MelDataset(torch.utils.data.Dataset):
         self.text_cleaner = TextCleaner(dict_path)
         self.sr = sr
 
-        self.to_melspec = torchaudio.transforms.MelSpectrogram(**MEL_PARAMS)
+        self.to_melspec = torchaudio.transforms.MelSpectrogram(**mel_params, sample_rate=sr, pad_mode="reflect")
         self.mean, self.std = -4, 4
         
 
@@ -102,35 +102,18 @@ class MelDataset(torch.utils.data.Dataset):
         if sr != 24000:
             wave = librosa.resample(wave, orig_sr=sr, target_sr=24000)
     
-        # Tokenize text while preserving punctuation
-        tokens = re.findall(r"[\w']+|[.,!?;:]", text)
-    
-        # Transcribe the entire sentence at once using the G2P model
-        result = list(transcribe(' '.join([t for t in tokens if re.match(r"[\w']+", t)])))  # Pass only words to `transcribe`
-        
-        # Prepare to merge transcriptions and punctuation
-        transcription = []
-        result_index = 0
-    
-        for token in tokens:
-            if re.match(r"[.,!?;:]", token):  # If token is punctuation
-                # Append punctuation to the last phonetic transcription in the list
-                if transcription:
-                    transcription[-1] += token
-            else:  # Otherwise, it's a word
-                t, phonetic = result[result_index]
-                #print(t,phonetic)
-                transcription.extend(phonetic.split())  # Split phonetic into individual elements and add to transcription
-                result_index += 1
-    
-        # Join transcription as a single string for further processing
-        ps = ' '.join(transcription)
-        #print(transcription)
-        # Clean text and convert to indices
-        text_indices = self.text_cleaner(ps)
 
+
+
+        #print(ps)
+        # Clean text and convert to indices
+        text_indices = self.text_cleaner(text)
+
+        
+
+        
         #print(text_indices)
-        blank_index = self.text_cleaner.word_index_dictionary[" "]
+        blank_index = self.text_cleaner.word_index_dictionary["$"]
         text_indices.insert(0, blank_index)  # Add silence at the beginning
         text_indices.append(blank_index)     # Add silence at the end
     
@@ -201,7 +184,7 @@ def build_dataloader(path_list,
                      validation=False,
                      batch_size=4,
                      num_workers=1,
-                     device='cuda',
+                     device='cpu',
                      collate_config={},
                      dataset_config={}):
 
