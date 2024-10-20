@@ -57,6 +57,7 @@ class Trainer(object):
         self.finish_train = False
         self.logger = logger
         self.fp16_run = True
+        #To enable whisper
         #self.whisper_model = AutoModel.from_pretrained("NbAiLabBeta/nb-whisper-small-verbatim")
         #self.whisper_model.to(self.device)
         #self.whisper_model.eval()
@@ -196,10 +197,12 @@ class Trainer(object):
     def run(self, batch):
         self.optimizer.zero_grad()
         batch = [b.to(self.device) for b in batch]
-        #batch = [b.to(self.device) if isinstance(b, torch.Tensor) else b for b in batch]
-        
-        #text_input, text_input_length, mel_input, mel_input_length, paths, wave_input = batch
+
+
         text_input, text_input_length, mel_input, mel_input_length = batch
+                #Swap to these to enable whisper
+        #batch = [b.to(self.device) if isinstance(b, torch.Tensor) else b for b in batch]
+        #text_input, text_input_length, mel_input, mel_input_length, paths, wave_input = batch
 
         mel_input_length = mel_input_length // (2 ** self.model.n_down)
         future_mask = self.model.get_future_mask(
@@ -217,6 +220,7 @@ class Trainer(object):
             loss_s2s += self.criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
         loss_s2s /= text_input.size(0)
 
+        #Whisper embeddings 
         #feature_matching_loss = self._calculate_feature_matching_loss(wave_input, mel_input, "MSE")
 
         #lambda_feature = 0.2  # Weight for feature matching loss
@@ -233,6 +237,8 @@ class Trainer(object):
         #torch.nn.utils.clip_grad_value_(self.model.parameters(), 50)
         self.optimizer.step()
         self.scheduler.step()
+
+        # you need to return the featue loss here too if you want it to be logged
         return {'loss': loss.item(),
                 'ctc': loss_ctc.item(),
                 's2s': loss_s2s.item()
