@@ -7,7 +7,7 @@ Can be used for other lang, but i used it for Norweagian
 - Switched from CNN to Conformer blocks
 - Added whisper to use transfer learning, but not currently using it
 - Added so that you get GT and predicted sequence is given in wandb with WER score
-  
+- to get the whisper to work you need to uncomment the blocks in the trainer and in the meldataset.py you need to return the wav
 
 
 
