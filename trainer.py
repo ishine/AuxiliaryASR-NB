@@ -340,7 +340,7 @@ class Trainer(object):
                 calc_wer(
                     target[:text_length],
                     pred[:mel_length],
-                    ignore_indexes=[0, 1, 2, 3, 10]
+                    ignore_indexes=[0, 1, 2, 3, 4]
                 )
                 for target, pred, text_length, mel_length in zip(
                     text_input.cpu(), amax_ppgs.cpu(), text_input_length.cpu(), mel_input_length.cpu()
