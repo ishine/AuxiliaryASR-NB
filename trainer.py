@@ -374,11 +374,11 @@ class Trainer(object):
             ):
                 target_filtered = [
                     int(t.item()) for t in target[:text_length]
-                    if int(t.item()) not in [0, 1, 2, 3, 10]
+                    if int(t.item()) not in [0, 1, 2, 3, 4]
                 ]
                 pred_filtered = [
                     int(p.item()) for p in pred[:mel_length]
-                    if int(p.item()) not in [0, 1, 2, 3, 10]
+                    if int(p.item()) not in [0, 1, 2, 3, 4]
                 ]
     
                 # Check for exact match
@@ -392,7 +392,7 @@ class Trainer(object):
     
                 # Calculate WER for the table (if needed)
                 wers = calc_wer(
-                    target[:text_length], pred[:mel_length], ignore_indexes=[0, 1, 2, 3, 10]
+                    target[:text_length], pred[:mel_length], ignore_indexes=[0, 1, 2, 3, 4]
                 )
     
                 # Add data to the WandB table
