@@ -3,7 +3,7 @@ This repo is used as a Norweagian Phoneme-level ASR in TTS as a text aligner for
 Can be used for other lang, but i used it for Norweagian
 
 
-## Current Edits to the orignal repo
+## Current Edits compared to the original repo
 - Switched from CNN to Conformer blocks
 - Added whisper to use transfer learning, but not currently using it
 - Added so that you get GT and predicted sequence is given in wandb with WER score
