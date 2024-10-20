@@ -57,9 +57,9 @@ class Trainer(object):
         self.finish_train = False
         self.logger = logger
         self.fp16_run = True
-        self.whisper_model = AutoModel.from_pretrained("NbAiLabBeta/nb-whisper-small-verbatim")
-        self.whisper_model.to(self.device)
-        self.whisper_model.eval()
+        #self.whisper_model = AutoModel.from_pretrained("NbAiLabBeta/nb-whisper-small-verbatim")
+        #self.whisper_model.to(self.device)
+        #self.whisper_model.eval()
 
 
     def save_checkpoint(self, checkpoint_path):
