@@ -26,7 +26,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch.nn import Conv1d, AvgPool1d, Conv2d
 import torchaudio
-
+import whisper
 import wandb
 
 
@@ -57,6 +57,9 @@ class Trainer(object):
         self.finish_train = False
         self.logger = logger
         self.fp16_run = True
+        self.whisper_model = AutoModel.from_pretrained("NbAiLabBeta/nb-whisper-small-verbatim")
+        self.whisper_model.to(self.device)
+        self.whisper_model.eval()
 
 
     def save_checkpoint(self, checkpoint_path):
