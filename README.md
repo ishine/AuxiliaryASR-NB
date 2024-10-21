@@ -1,6 +1,8 @@
 # AuxiliaryASR
 This repo is used as a Norweagian Phoneme-level ASR in TTS as a text aligner for StyleTTS2 ([https://github.com/yl4579/StyleTTS2])
-Can be used for other lang, but i used it for Norweagian
+Can be used for other lang, but i used it for Norweagian.
+This repo is based on https://github.com/yl4579/AuxiliaryASR
+
 
 
 ## Current Edits compared to the original repo
@@ -8,6 +10,7 @@ Can be used for other lang, but i used it for Norweagian
 - Added whisper to use transfer learning, but not currently using it
 - Added so that you get GT and predicted sequence is given in wandb with WER score
 - to get the whisper to work you need to uncomment the blocks in the trainer and in the meldataset.py you need to return the wav
+- The `train_list.txt` and `val_list.txt` expects it to already be phonemized
 
 
 
