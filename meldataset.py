@@ -113,7 +113,7 @@ class MelDataset(torch.utils.data.Dataset):
 
         
         #print(text_indices)
-        blank_index = self.text_cleaner.word_index_dictionary["$"]
+        blank_index = self.text_cleaner.word_index_dictionary[" "]
         text_indices.insert(0, blank_index)  # Add silence at the beginning
         text_indices.append(blank_index)     # Add silence at the end
     
